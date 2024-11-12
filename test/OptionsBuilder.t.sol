@@ -18,6 +18,7 @@ contract StableEngineTest is Test {
         console2.log("Lz Compose Message Options: ", vm.toString(options));
     }
 
+    // lZ Receive: A - B
     function test_Build_LzReceive_Options() public pure {
         bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200000, 0);
         console2.log("Lz Receive Message Options: ", vm.toString(options));

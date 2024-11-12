@@ -1,33 +1,12 @@
-// Layout of Contract:
-// version
-// imports
-// errors
-// interfaces, libraries, contracts
-// Type declarations
-// State variables
-// Events
-// Modifiers
-// Functions
-
-// Layout of Functions:
-// constructor
-// receive function (if exists)
-// fallback function (if exists)
-// external
-// public
-// internal
-// private
-// internal & private view & pure functions
-// external & public view & pure functions
-
 // SPDX-License-Identifier: MIT
 
 pragma solidity 0.8.19;
 
-import { OracleLib, AggregatorV3Interface } from "./libraries/OracleLib.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { DecentralizedStableCoin } from "./DecentralizedStableCoin.sol";
+import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
+import {OApp, Origin, MessagingFee, MessagingReceipt} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
 
 /*
  * @title DSCEngine
@@ -48,7 +27,7 @@ import { DecentralizedStableCoin } from "./DecentralizedStableCoin.sol";
  * for minting and redeeming DSC, as well as depositing and withdrawing collateral.
  * @notice This contract is based on the MakerDAO DSS system
  */
-contract DSCEngine is ReentrancyGuard {
+contract DSCEngine is Oapp, ReentrancyGuard {
     ///////////////////
     // Errors
     ///////////////////
@@ -60,6 +39,7 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__MintFailed();
     error DSCEngine__HealthFactorOk();
     error DSCEngine__HealthFactorNotImproved();
+    error DSCEngine__CurrentChainNotSet();
 
     ///////////////////
     // Types
@@ -70,6 +50,7 @@ contract DSCEngine is ReentrancyGuard {
     // State Variables
     ///////////////////
     DecentralizedStableCoin private immutable i_dsc;
+    uint32 private currentChain; // the layerzero _dstEid of the chain the contract is deployed on
 
     uint256 private constant LIQUIDATION_THRESHOLD = 50; // This means you need to be 200% over-collateralized
     uint256 private constant LIQUIDATION_BONUS = 10; // This means you get assets at a 10% discount when liquidating
@@ -115,7 +96,13 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////
     // Functions
     ///////////////////
-    constructor(address[] memory tokenAddresses, address[] memory priceFeedAddresses, address dscAddress) {
+    constructor(
+        address _endpoint,
+        address _owner,
+        address[] memory tokenAddresses,
+        address[] memory priceFeedAddresses,
+        address dscAddress
+    ) OApp(_endpoint, _owner) {
         if (tokenAddresses.length != priceFeedAddresses.length) {
             revert DSCEngine__TokenAddressesAndPriceFeedAddressesAmountsDontMatch();
         }
@@ -126,6 +113,7 @@ contract DSCEngine is ReentrancyGuard {
             s_collateralTokens.push(tokenAddresses[i]);
         }
         i_dsc = DecentralizedStableCoin(dscAddress);
+        _transferOwnership(_owner);
     }
 
     ///////////////////
@@ -140,12 +128,11 @@ contract DSCEngine is ReentrancyGuard {
     function depositCollateralAndMintDsc(
         address tokenCollateralAddress,
         uint256 amountCollateral,
-        uint256 amountDscToMint
-    )
-        external
-    {
+        uint256 amountDscToMint,
+        uint32 dstEid
+    ) external {
         depositCollateral(tokenCollateralAddress, amountCollateral);
-        mintDsc(amountDscToMint);
+        mintDsc(dstEid, amountDscToMint);
     }
 
     /*
@@ -154,11 +141,7 @@ contract DSCEngine is ReentrancyGuard {
      * @param amountDscToBurn: The amount of DSC you want to burn
      * @notice This function will withdraw your collateral and burn DSC in one transaction
      */
-    function redeemCollateralForDsc(
-        address tokenCollateralAddress,
-        uint256 amountCollateral,
-        uint256 amountDscToBurn
-    )
+    function redeemCollateralForDsc(address tokenCollateralAddress, uint256 amountCollateral, uint256 amountDscToBurn)
         external
         moreThanZero(amountCollateral)
         isAllowedToken(tokenCollateralAddress)
@@ -174,10 +157,7 @@ contract DSCEngine is ReentrancyGuard {
      * @notice This function will redeem your collateral.
      * @notice If you have DSC minted, you will not be able to redeem until you burn your DSC
      */
-    function redeemCollateral(
-        address tokenCollateralAddress,
-        uint256 amountCollateral
-    )
+    function redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral)
         external
         moreThanZero(amountCollateral)
         nonReentrant
@@ -212,11 +192,7 @@ contract DSCEngine is ReentrancyGuard {
     anyone.
      * For example, if the price of the collateral plummeted before anyone could be liquidated.
      */
-    function liquidate(
-        address collateral,
-        address user,
-        uint256 debtToCover
-    )
+    function liquidate(address collateral, address user, uint256 debtToCover)
         external
         moreThanZero(debtToCover)
         nonReentrant
@@ -252,10 +228,18 @@ contract DSCEngine is ReentrancyGuard {
      * @param amountDscToMint: The amount of DSC you want to mint
      * You can only mint DSC if you have enough collateral
      */
-    function mintDsc(uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
+    function mintDsc(uint32 _dstEid, uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
         s_DSCMinted[msg.sender] += amountDscToMint;
         revertIfHealthFactorIsBroken(msg.sender);
-        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
+        if (currentChain == 0) {
+            revert DSCEngine__CurrentChainNotSet();
+        } else if (_dstEid == currentChain) {
+            bool minted = i_dsc.mint(msg.sender, amountDscToMint);
+        } else {
+            bytes memory _payload = abi.encode(amountDscToMint);
+            MessagingReceipt memory receipt =
+                _lzSend(_dstEid, _payload, _options, MessagingFee(msg.value, 0), payable(msg.sender));
+        }
 
         if (minted != true) {
             revert DSCEngine__MintFailed();
@@ -266,10 +250,7 @@ contract DSCEngine is ReentrancyGuard {
      * @param tokenCollateralAddress: The ERC20 token address of the collateral you're depositing
      * @param amountCollateral: The amount of collateral you're depositing
      */
-    function depositCollateral(
-        address tokenCollateralAddress,
-        uint256 amountCollateral
-    )
+    function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral)
         public
         moreThanZero(amountCollateral)
         nonReentrant
@@ -286,12 +267,7 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////
     // Private Functions
     ///////////////////
-    function _redeemCollateral(
-        address tokenCollateralAddress,
-        uint256 amountCollateral,
-        address from,
-        address to
-    )
+    function _redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral, address from, address to)
         private
     {
         s_collateralDeposited[from][tokenCollateralAddress] -= amountCollateral;
@@ -311,6 +287,33 @@ contract DSCEngine is ReentrancyGuard {
             revert DSCEngine__TransferFailed();
         }
         i_dsc.burn(amountDscToBurn);
+    }
+
+    // ==================
+    // === LZ RECEIVE ===
+    // ==================
+
+    function _lzReceive(
+        Origin calldata _origin,
+        bytes32 _guid,
+        bytes calldata payload,
+        address, /*_executor*/
+        bytes calldata /*_extraData*/
+    ) internal override {
+        (uint256 amountDscToMint) = abi.decode(payload, (uint256));
+
+        // update tokensMinted on OAPP
+        tokensMinted[recipient] += amountDscToMint; // will we need this??
+
+        // send composed call to the token contract
+        endpoint.sendCompose(token, _guid, 0, payload); // token needs to be added as a storage var + set
+    }
+
+    //////////////////////////////
+    // External OnlyOwner Functions
+    //////////////////////////////
+    function setCurrentChain(uint32 _currentChain) external onlyOwner {
+        currentChain = _currentChain;
     }
 
     //////////////////////////////
@@ -341,10 +344,7 @@ contract DSCEngine is ReentrancyGuard {
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
     }
 
-    function _calculateHealthFactor(
-        uint256 totalDscMinted,
-        uint256 collateralValueInUsd
-    )
+    function _calculateHealthFactor(uint256 totalDscMinted, uint256 collateralValueInUsd)
         internal
         pure
         returns (uint256)
@@ -366,10 +366,7 @@ contract DSCEngine is ReentrancyGuard {
     // External & Public View & Pure Functions
     ////////////////////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////
-    function calculateHealthFactor(
-        uint256 totalDscMinted,
-        uint256 collateralValueInUsd
-    )
+    function calculateHealthFactor(uint256 totalDscMinted, uint256 collateralValueInUsd)
         external
         pure
         returns (uint256)
@@ -388,11 +385,7 @@ contract DSCEngine is ReentrancyGuard {
     function getUsdValue(
         address token,
         uint256 amount // in WEI
-    )
-        external
-        view
-        returns (uint256)
-    {
+    ) external view returns (uint256) {
         return _getUsdValue(token, amount);
     }
 

@@ -1,32 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-// This is considered an Exogenous, Decentralized, Anchored (pegged), Crypto Collateralized low volitility coin
-
-// Layout of Contract:
-// version
-// imports
-// interfaces, libraries, contracts
-// errors
-// Type declarations
-// State variables
-// Events
-// Modifiers
-// Functions
-
-// Layout of Functions:
-// constructor
-// receive function (if exists)
-// fallback function (if exists)
-// external
-// public
-// internal
-// private
-// view & pure functions
-
 pragma solidity 0.8.19;
 
-import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+// import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+// import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {OFT} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oft/OFT.sol";
 import {ILayerZeroComposer} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroComposer.sol";
 
@@ -41,20 +18,17 @@ import {ILayerZeroComposer} from "@layerzerolabs/lz-evm-protocol-v2/contracts/in
 * This is the contract meant to be owned by DSCEngine. It is a ERC20 token that can be minted and burned by the
 DSCEngine smart contract.
  */
-contract DecentralizedStableCoin is ERC20Burnable, Ownable {
+
+contract DecentralizedStableCoin is OFT, ILayerZeroComposer {
     error DecentralizedStableCoin__AmountMustBeMoreThanZero();
     error DecentralizedStableCoin__BurnAmountExceedsBalance();
     error DecentralizedStableCoin__NotZeroAddress();
 
-    /*
-    In future versions of OpenZeppelin contracts package, Ownable must be declared with an address of the contract owner
-    as a parameter.
-    For example:
-    constructor() ERC20("DecentralizedStableCoin", "DSC") Ownable(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266) {}
-    Related code changes can be viewed in this commit:
-    https://github.com/OpenZeppelin/openzeppelin-contracts/commit/13d5e0466a9855e9305119ed383e54fc913fdc60
-    */
-    constructor() ERC20("DecentralizedStableCoin", "DSC") {}
+    constructor(string memory oftName, string memory oftSymbol, address lzEndpoint, address vault, address _owner)
+        OFT(oftName, oftSymbol, lzEndpoint, _owner)
+    {
+        _transferOwnership(_owner);
+    }
 
     function burn(uint256 _amount) public override onlyOwner {
         uint256 balance = balanceOf(msg.sender);
@@ -76,5 +50,17 @@ contract DecentralizedStableCoin is ERC20Burnable, Ownable {
         }
         _mint(_to, _amount);
         return true;
+    }
+
+    function lzCompose(address _oApp, bytes32 _guid, bytes calldata _message, address, bytes calldata)
+        external
+        payable
+        override
+    {
+        // Decode the payload to get the message
+        (uint256 amount, address recipient, uint8 choice) = abi.decode(_message, (uint256, address, uint8));
+
+        // mint tokens to recipient
+        _mint(recipient, amount);
     }
 }
