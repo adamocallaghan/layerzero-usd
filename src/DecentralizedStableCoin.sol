@@ -9,7 +9,7 @@ contract DecentralizedStableCoin is OFT, ILayerZeroComposer {
     error DecentralizedStableCoin__BurnAmountExceedsBalance();
     error DecentralizedStableCoin__NotZeroAddress();
 
-    constructor(string memory oftName, string memory oftSymbol, address lzEndpoint, address vault, address _owner)
+    constructor(string memory oftName, string memory oftSymbol, address lzEndpoint, address _owner)
         OFT(oftName, oftSymbol, lzEndpoint, _owner)
     {
         _transferOwnership(_owner);

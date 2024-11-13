@@ -332,7 +332,7 @@ contract DSCEngine is OApp, ReentrancyGuard {
                 revert DSCEngine__BreaksHealthFactor(healthFactorAfterBurnOnSourceChain);
             }
             s_DSCMinted[recipient] -= amountDscToMint; // actually the amountDscToBurn, not Mint
-            _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
+            _redeemCollateral(tokenCollateralAddress, amountCollateral, recipient, recipient);
         } else if (targetFunction == 2) {
             // liquidate
         } else {
