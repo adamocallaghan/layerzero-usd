@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.19;
 
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
@@ -8,25 +7,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
 import {OApp, Origin, MessagingFee, MessagingReceipt} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
 
-/*
- * @title DSCEngine
- * @author Patrick Collins
- *
- * The system is designed to be as minimal as possible, and have the tokens maintain a 1 token == $1 peg at all times.
- * This is a stablecoin with the properties:
- * - Exogenously Collateralized
- * - Dollar Pegged
- * - Algorithmically Stable
- *
- * It is similar to DAI if DAI had no governance, no fees, and was backed by only WETH and WBTC.
- *
- * Our DSC system should always be "overcollateralized". At no point, should the value of
- * all collateral < the $ backed value of all the DSC.
- *
- * @notice This contract is the core of the Decentralized Stablecoin system. It handles all the logic
- * for minting and redeeming DSC, as well as depositing and withdrawing collateral.
- * @notice This contract is based on the MakerDAO DSS system
- */
 contract DSCEngine is OApp, ReentrancyGuard {
     ///////////////////
     // Errors
@@ -140,7 +120,7 @@ contract DSCEngine is OApp, ReentrancyGuard {
         bytes calldata options
     ) external {
         depositCollateral(tokenCollateralAddress, amountCollateral);
-        mintDsc(dstEid, amountDscToMint, options);
+        mintDsc(dstEid, amountDscToMint, options, tokenCollateralAddress, amountCollateral);
     }
 
     /*
@@ -163,7 +143,10 @@ contract DSCEngine is OApp, ReentrancyGuard {
             _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
             revertIfHealthFactorIsBroken(msg.sender);
         } else {
-            bytes memory _payload = abi.encode(amountDscToBurn, msg.sender, TargetFunction.ReleaseCollateral);
+            i_dsc.burn(msg.sender, amountDscToBurn); // burn OFT stablecoins on the source end, but need to update the user balance on dest
+            bytes memory _payload = abi.encode(
+                amountDscToBurn, msg.sender, TargetFunction.ReleaseCollateral, tokenCollateralAddress, amountCollateral
+            );
             MessagingReceipt memory receipt =
                 _lzSend(_dstEid, _payload, _options, MessagingFee(msg.value, 0), payable(msg.sender));
         }
@@ -246,12 +229,13 @@ contract DSCEngine is OApp, ReentrancyGuard {
      * @param amountDscToMint: The amount of DSC you want to mint
      * You can only mint DSC if you have enough collateral
      */
-    function mintDsc(uint32 _dstEid, uint256 amountDscToMint, bytes calldata _options)
-        public
-        payable
-        moreThanZero(amountDscToMint)
-        nonReentrant
-    {
+    function mintDsc(
+        uint32 _dstEid,
+        uint256 amountDscToMint,
+        bytes calldata _options,
+        address tokenCollateralAddress,
+        uint256 amountCollateral
+    ) public payable moreThanZero(amountDscToMint) nonReentrant {
         s_DSCMinted[msg.sender] += amountDscToMint;
         revertIfHealthFactorIsBroken(msg.sender);
         if (currentChain == 0) {
@@ -262,7 +246,8 @@ contract DSCEngine is OApp, ReentrancyGuard {
                 revert DSCEngine__MintFailed();
             }
         } else {
-            bytes memory _payload = abi.encode(amountDscToMint, msg.sender, TargetFunction.Mint); // 0 == mint on receiving end
+            bytes memory _payload =
+                abi.encode(amountDscToMint, msg.sender, TargetFunction.Mint, tokenCollateralAddress, amountCollateral); // 0 == mint on receiving end
             MessagingReceipt memory receipt =
                 _lzSend(_dstEid, _payload, _options, MessagingFee(msg.value, 0), payable(msg.sender));
         }
@@ -322,8 +307,13 @@ contract DSCEngine is OApp, ReentrancyGuard {
         address, /*_executor*/
         bytes calldata /*_extraData*/
     ) internal override {
-        (uint256 amountDscToMint, address recipient, uint8 targetFunction) =
-            abi.decode(payload, (uint256, address, uint8));
+        (
+            uint256 amountDscToMint,
+            address recipient,
+            uint8 targetFunction,
+            address tokenCollateralAddress,
+            uint256 amountCollateral
+        ) = abi.decode(payload, (uint256, address, uint8, address, uint256));
 
         // update tokensMinted on OAPP
         // tokensMinted[recipient] += amountDscToMint; // will we need this??
@@ -332,6 +322,17 @@ contract DSCEngine is OApp, ReentrancyGuard {
             endpoint.sendCompose(address(i_dsc), _guid, 0, payload);
         } else if (targetFunction == 1) {
             // release collateral
+            // we need to check the user's health factor here *before* releasing their collateral
+            (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(recipient);
+            // amountDscToMint is actually *amountDscToBurn* that has already been burned on the source chain
+            uint256 healthFactorAfterBurnOnSourceChain =
+                _calculateHealthFactor(totalDscMinted - amountDscToMint, collateralValueInUsd);
+            // revert if the new health factor will be less than the minimum
+            if (healthFactorAfterBurnOnSourceChain < MIN_HEALTH_FACTOR) {
+                revert DSCEngine__BreaksHealthFactor(healthFactorAfterBurnOnSourceChain);
+            }
+            s_DSCMinted[recipient] -= amountDscToMint; // actually the amountDscToBurn, not Mint
+            _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
         } else if (targetFunction == 2) {
             // liquidate
         } else {

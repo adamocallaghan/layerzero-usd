@@ -1,23 +1,8 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.19;
 
-// import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-// import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {OFT} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oft/OFT.sol";
 import {ILayerZeroComposer} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroComposer.sol";
-
-/*
- * @title DecentralizedStableCoin
- * @author Patrick Collins
- * Collateral: Exogenous
- * Minting (Stability Mechanism): Decentralized (Algorithmic)
- * Value (Relative Stability): Anchored (Pegged to USD)
- * Collateral Type: Crypto
- *
-* This is the contract meant to be owned by DSCEngine. It is a ERC20 token that can be minted and burned by the
-DSCEngine smart contract.
- */
 
 contract DecentralizedStableCoin is OFT, ILayerZeroComposer {
     error DecentralizedStableCoin__AmountMustBeMoreThanZero();
@@ -61,6 +46,6 @@ contract DecentralizedStableCoin is OFT, ILayerZeroComposer {
         (uint256 amountDscToMint, address recipient) = abi.decode(_message, (uint256, address));
 
         // mint tokens to recipient
-        _mint(recipient, amountDscToMint); // _guid._sender == the original msg.sender (user)
+        _mint(recipient, amountDscToMint);
     }
 }
