@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -27,7 +27,7 @@ import {OApp, Origin, MessagingFee, MessagingReceipt} from "@layerzerolabs/lz-ev
  * for minting and redeeming DSC, as well as depositing and withdrawing collateral.
  * @notice This contract is based on the MakerDAO DSS system
  */
-contract DSCEngine is Oapp, ReentrancyGuard {
+contract DSCEngine is OApp, ReentrancyGuard {
     ///////////////////
     // Errors
     ///////////////////
@@ -40,6 +40,7 @@ contract DSCEngine is Oapp, ReentrancyGuard {
     error DSCEngine__HealthFactorOk();
     error DSCEngine__HealthFactorNotImproved();
     error DSCEngine__CurrentChainNotSet();
+    error DSCEngine__InvalidTargetFunction();
 
     ///////////////////
     // Types
@@ -68,6 +69,12 @@ contract DSCEngine is Oapp, ReentrancyGuard {
     mapping(address user => uint256 amount) private s_DSCMinted;
     /// @dev If we know exactly how many tokens we have, we could make this immutable!
     address[] private s_collateralTokens;
+
+    enum TargetFunction {
+        Mint,
+        ReleaseCollateral,
+        Liquidate
+    }
 
     ///////////////////
     // Events
@@ -129,10 +136,11 @@ contract DSCEngine is Oapp, ReentrancyGuard {
         address tokenCollateralAddress,
         uint256 amountCollateral,
         uint256 amountDscToMint,
-        uint32 dstEid
+        uint32 dstEid,
+        bytes calldata options
     ) external {
         depositCollateral(tokenCollateralAddress, amountCollateral);
-        mintDsc(dstEid, amountDscToMint);
+        mintDsc(dstEid, amountDscToMint, options);
     }
 
     /*
@@ -141,14 +149,24 @@ contract DSCEngine is Oapp, ReentrancyGuard {
      * @param amountDscToBurn: The amount of DSC you want to burn
      * @notice This function will withdraw your collateral and burn DSC in one transaction
      */
-    function redeemCollateralForDsc(address tokenCollateralAddress, uint256 amountCollateral, uint256 amountDscToBurn)
-        external
-        moreThanZero(amountCollateral)
-        isAllowedToken(tokenCollateralAddress)
-    {
-        _burnDsc(amountDscToBurn, msg.sender, msg.sender);
-        _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
-        revertIfHealthFactorIsBroken(msg.sender);
+    function redeemCollateralForDsc(
+        address tokenCollateralAddress,
+        uint256 amountCollateral,
+        uint256 amountDscToBurn,
+        uint32 _dstEid,
+        bytes calldata _options
+    ) external payable moreThanZero(amountCollateral) isAllowedToken(tokenCollateralAddress) {
+        if (currentChain == 0) {
+            revert DSCEngine__CurrentChainNotSet();
+        } else if (_dstEid == currentChain) {
+            _burnDsc(amountDscToBurn, msg.sender, msg.sender);
+            _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
+            revertIfHealthFactorIsBroken(msg.sender);
+        } else {
+            bytes memory _payload = abi.encode(amountDscToBurn, msg.sender, TargetFunction.ReleaseCollateral);
+            MessagingReceipt memory receipt =
+                _lzSend(_dstEid, _payload, _options, MessagingFee(msg.value, 0), payable(msg.sender));
+        }
     }
 
     /*
@@ -228,21 +246,25 @@ contract DSCEngine is Oapp, ReentrancyGuard {
      * @param amountDscToMint: The amount of DSC you want to mint
      * You can only mint DSC if you have enough collateral
      */
-    function mintDsc(uint32 _dstEid, uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
+    function mintDsc(uint32 _dstEid, uint256 amountDscToMint, bytes calldata _options)
+        public
+        payable
+        moreThanZero(amountDscToMint)
+        nonReentrant
+    {
         s_DSCMinted[msg.sender] += amountDscToMint;
         revertIfHealthFactorIsBroken(msg.sender);
         if (currentChain == 0) {
             revert DSCEngine__CurrentChainNotSet();
         } else if (_dstEid == currentChain) {
             bool minted = i_dsc.mint(msg.sender, amountDscToMint);
+            if (minted != true) {
+                revert DSCEngine__MintFailed();
+            }
         } else {
-            bytes memory _payload = abi.encode(amountDscToMint);
+            bytes memory _payload = abi.encode(amountDscToMint, msg.sender, TargetFunction.Mint); // 0 == mint on receiving end
             MessagingReceipt memory receipt =
                 _lzSend(_dstEid, _payload, _options, MessagingFee(msg.value, 0), payable(msg.sender));
-        }
-
-        if (minted != true) {
-            revert DSCEngine__MintFailed();
         }
     }
 
@@ -286,7 +308,7 @@ contract DSCEngine is Oapp, ReentrancyGuard {
         if (!success) {
             revert DSCEngine__TransferFailed();
         }
-        i_dsc.burn(amountDscToBurn);
+        i_dsc.burn(onBehalfOf, amountDscToBurn);
     }
 
     // ==================
@@ -300,13 +322,21 @@ contract DSCEngine is Oapp, ReentrancyGuard {
         address, /*_executor*/
         bytes calldata /*_extraData*/
     ) internal override {
-        (uint256 amountDscToMint) = abi.decode(payload, (uint256));
+        (uint256 amountDscToMint, address recipient, uint8 targetFunction) =
+            abi.decode(payload, (uint256, address, uint8));
 
         // update tokensMinted on OAPP
-        tokensMinted[recipient] += amountDscToMint; // will we need this??
-
-        // send composed call to the token contract
-        endpoint.sendCompose(token, _guid, 0, payload); // token needs to be added as a storage var + set
+        // tokensMinted[recipient] += amountDscToMint; // will we need this??
+        if (targetFunction == 0) {
+            // send composed call to the token contract
+            endpoint.sendCompose(address(i_dsc), _guid, 0, payload);
+        } else if (targetFunction == 1) {
+            // release collateral
+        } else if (targetFunction == 2) {
+            // liquidate
+        } else {
+            revert DSCEngine__InvalidTargetFunction();
+        }
     }
 
     //////////////////////////////
